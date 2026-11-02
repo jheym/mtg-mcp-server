@@ -1,7 +1,9 @@
 """Scryfall bulk card data service — lazy download and in-memory card cache.
 
 Download Scryfall's Oracle Cards bulk data once and keep it in memory for O(1)
-card lookups and fast substring searches. Refresh automatically when the data
+card lookups and fast substring searches. The download is streamed to a temp
+file and parsed line by line, so peak memory is roughly the final card set,
+not the whole decompressed payload plus every raw card dict. Refresh automatically when the data
 becomes stale (default 12h). On refresh failure with existing data, serve stale
 data rather than propagating the error.
 
@@ -23,9 +25,13 @@ import asyncio
 import contextlib
 import gzip
 import json
+import os
 import random
+import sys
+import tempfile
 import time
 import zlib
+from pathlib import Path
 from typing import TYPE_CHECKING, Self
 
 import httpx
@@ -36,6 +42,8 @@ from mtg_mcp_server.services.base import DEFAULT_USER_AGENT, ServiceError
 from mtg_mcp_server.types import Card
 
 if TYPE_CHECKING:
+    import io
+    from collections.abc import Iterator
     from typing import Any as JSONValue
 
 __all__ = ["ScryfallBulkClient", "ScryfallBulkDownloadError", "ScryfallBulkError"]
@@ -55,6 +63,27 @@ _EXCLUDED_LAYOUTS: frozenset[str] = frozenset(
         "token",
     }
 )
+
+
+# Download in 1 MiB chunks so the body is never held in memory as a whole.
+_DOWNLOAD_CHUNK_SIZE = 1 << 20
+
+
+def _intern_card(card: Card) -> None:
+    """Share repeated short strings across cards to cut resident memory.
+
+    Every card carries a ~20-entry ``legalities`` dict whose keys and values
+    ("commander", "legal", ...) repeat across ~36k cards, plus repeated
+    rarity/layout/set/color/keyword strings. JSON parsing creates a fresh
+    string object for each, so interning them saves tens of MB.
+    """
+    card.legalities = {sys.intern(k): sys.intern(v) for k, v in card.legalities.items()}
+    card.colors = [sys.intern(c) for c in card.colors]
+    card.color_identity = [sys.intern(c) for c in card.color_identity]
+    card.keywords = [sys.intern(k) for k in card.keywords]
+    card.rarity = sys.intern(card.rarity)
+    card.layout = sys.intern(card.layout)
+    card.set_code = sys.intern(card.set_code)
 
 
 class ScryfallBulkError(ServiceError):
@@ -179,12 +208,18 @@ class ScryfallBulkClient:
                 metadata = await self._fetch_metadata()
                 download_url = self._resolve_download_url(metadata)
 
-                # Step 2: Download the bulk data (with ETag if URL matches)
-                result = await self._download(download_url)
+                # Step 2: Stream the bulk data to a temp file (with ETag if URL matches)
+                path = await self._download(download_url)
 
-                if result is not None:
-                    # Got new data — parse it
-                    self._parse(result)
+                if path is not None:
+                    # Got new data — parse it off the event loop, then swap in.
+                    # Old data keeps serving until the new set is complete.
+                    try:
+                        cards, unique = await asyncio.to_thread(self._parse_file, path)
+                    finally:
+                        path.unlink(missing_ok=True)
+                    self._cards = cards
+                    self._unique_cards = unique
 
                 # Either we parsed new data or got 304 — update timestamp
                 self._loaded_at = time.monotonic()
@@ -493,12 +528,14 @@ class ScryfallBulkClient:
         except httpx.RequestError as exc:
             raise ScryfallBulkDownloadError(f"Network error fetching bulk metadata: {exc}") from exc
 
-    async def _download(self, url: str) -> bytes | None:
-        """Download the Oracle Cards bulk data file.
+    async def _download(self, url: str) -> Path | None:
+        """Stream the Oracle Cards bulk file to a temporary file on disk.
 
-        Sends ``If-None-Match`` header when the URL matches the previous
+        The body is written to disk in chunks and never held in memory as a
+        whole. Sends ``If-None-Match`` when the URL matches the previous
         download's URL and we have a saved ETag. Returns ``None`` on HTTP
-        304 (data unchanged).
+        304 (data unchanged). The caller owns the returned file and must
+        delete it.
 
         Raises:
             ScryfallBulkDownloadError: On HTTP errors or network failures.
@@ -512,10 +549,12 @@ class ScryfallBulkClient:
         if self._etag is not None and self._etag_url == url:
             headers["If-None-Match"] = self._etag
 
+        tmp_path: Path | None = None
         try:
-            async with httpx.AsyncClient(timeout=120.0, headers=headers) as http:
-                response = await http.get(url)
-
+            async with (
+                httpx.AsyncClient(timeout=120.0, headers=headers) as http,
+                http.stream("GET", url) as response,
+            ):
                 if response.status_code == 304:
                     log.info("scryfall_bulk.not_modified", url=url)
                     return None
@@ -525,15 +564,30 @@ class ScryfallBulkClient:
                         f"HTTP {response.status_code} downloading bulk data from {url}"
                     )
 
-                # Save ETag for future conditional requests
+                fd, name = tempfile.mkstemp(prefix="scryfall-bulk-", suffix=".download")
+                tmp_path = Path(name)
+                size = 0
+                with os.fdopen(fd, "wb") as fh:
+                    async for chunk in response.aiter_bytes(_DOWNLOAD_CHUNK_SIZE):
+                        fh.write(chunk)
+                        size += len(chunk)
+                log.info("scryfall_bulk.downloaded", url=url, bytes=size)
+
+                # Save ETag only after the full body arrived
                 etag = response.headers.get("ETag")
                 if etag:
                     self._etag = etag
                     self._etag_url = url
 
-                return response.content
+                path, tmp_path = tmp_path, None  # hand ownership to the caller
+                return path
         except httpx.RequestError as exc:
             raise ScryfallBulkDownloadError(f"Network error downloading bulk data: {exc}") from exc
+        except OSError as exc:
+            raise ScryfallBulkDownloadError(f"Could not write bulk data to disk: {exc}") from exc
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
 
     @staticmethod
     def _resolve_download_url(metadata: dict) -> str:
@@ -565,80 +619,86 @@ class ScryfallBulkClient:
         )
 
     @staticmethod
-    def _decompress_if_gzip(raw: bytes) -> bytes:
-        """Decompress the payload when it starts with gzip magic bytes.
+    def _open_payload(path: Path) -> io.BufferedIOBase:
+        """Open the downloaded file, decompressing on the fly if it is gzip.
 
         Scryfall's current bulk files are served as ``.jsonl.gz`` with
         ``Content-Type: application/gzip`` (no ``Content-Encoding``), so httpx
         does not auto-decompress them. Detection is content-based (magic
         bytes), never URL-based, so either field's download works.
-
-        Raises:
-            ScryfallBulkError: If the payload is corrupt gzip.
         """
-        if raw[:2] != b"\x1f\x8b":
-            return raw
-        try:
-            return gzip.decompress(raw)
-        except (OSError, EOFError, zlib.error) as exc:
-            raise ScryfallBulkError(f"Failed to parse bulk data: corrupt gzip: {exc}") from exc
+        with path.open("rb") as probe:
+            magic = probe.read(2)
+        if magic == b"\x1f\x8b":
+            return gzip.open(path, "rb")
+        return path.open("rb")
 
     @staticmethod
-    def _extract_entries(payload: bytes) -> list[JSONValue]:
-        """Extract card entries from either payload shape.
+    def _iter_entries(fh: io.BufferedIOBase) -> Iterator[JSONValue]:
+        """Yield card entries one at a time from either payload shape.
 
-        Legacy shape (``download_uri``): a single JSON document that is a
-        JSON array of card objects. Current shape (``jsonl_download_uri``):
-        JSONL — one card object per line. A lone JSON object is accepted as
-        a single-entry payload (a degenerate one-line JSONL file).
-
-        Raises:
-            ScryfallBulkError: If the payload is neither shape.
-        """
-        try:
-            raw = json.loads(payload)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return ScryfallBulkClient._parse_jsonl(payload)
-
-        if isinstance(raw, dict):
-            return [raw]
-        if not isinstance(raw, list):
-            raise ScryfallBulkError("Bulk data is not a JSON array")
-        return raw
-
-    @staticmethod
-    def _parse_jsonl(payload: bytes) -> list[JSONValue]:
-        """Parse a JSONL payload: one JSON object per line, blank lines skipped.
+        Current shape (``jsonl_download_uri``): JSONL, one card object per
+        line, parsed line by line so only one raw entry is in memory at a
+        time. Legacy shape (``download_uri``): one JSON array; parsed as a
+        whole because the format cannot be split by line. A lone JSON
+        object on one line is a degenerate one-line JSONL file.
 
         Raises:
-            ScryfallBulkError: On undecodable bytes or a malformed line.
+            ScryfallBulkError: On corrupt gzip, undecodable bytes, a malformed
+                JSONL line, or a JSON document that is not an array/object.
         """
         try:
-            text = payload.decode("utf-8")
+            first = fh.read(1)
+            while first and first.isspace():
+                first = fh.read(1)
+            if not first:
+                return
+
+            if first == b"[":
+                raw = json.loads(first + fh.read())
+                if not isinstance(raw, list):  # pragma: no cover - "[" implies list
+                    raise ScryfallBulkError("Bulk data is not a JSON array")
+                yield from raw
+                return
+
+            lineno = 0
+            pending = first
+            for line in fh:
+                lineno += 1
+                if pending:
+                    line, pending = pending + line, b""
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ScryfallBulkError(
+                        f"Failed to parse bulk data (JSONL line {lineno}): {exc}"
+                    ) from exc
+            if pending.strip():  # payload was a single byte with no newline
+                lineno += 1
+                try:
+                    yield json.loads(pending)
+                except json.JSONDecodeError as exc:
+                    raise ScryfallBulkError(
+                        f"Failed to parse bulk data (JSONL line {lineno}): {exc}"
+                    ) from exc
         except UnicodeDecodeError as exc:
             raise ScryfallBulkError(f"Failed to parse bulk data: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise ScryfallBulkError(f"Failed to parse bulk data: {exc}") from exc
+        except (gzip.BadGzipFile, EOFError, zlib.error) as exc:
+            raise ScryfallBulkError(f"Failed to parse bulk data: corrupt gzip: {exc}") from exc
 
-        entries: list[JSONValue] = []
-        for lineno, line in enumerate(text.splitlines(), start=1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError as exc:
-                raise ScryfallBulkError(
-                    f"Failed to parse bulk data (JSONL line {lineno}): {exc}"
-                ) from exc
-        return entries
+    def _parse_file(self, path: Path) -> tuple[dict[str, Card], list[Card]]:
+        """Parse a downloaded Oracle Cards file into lookup structures.
 
-    def _parse(self, raw_bytes: bytes) -> None:
-        """Parse Oracle Cards bulk data into the in-memory card dicts.
-
-        Accepts both payload shapes across Scryfall's field rename: the
-        legacy JSON array (``download_uri``) and the current gzipped JSONL
-        (``jsonl_download_uri``). Shape is detected from content (gzip magic
-        bytes), not from the URL. Each entry is validated through
-        ``Card.model_validate()``.
+        Reads the file as a stream: each raw entry is validated into a
+        :class:`Card` and then dropped, so peak memory is the final card
+        set plus one entry, not the whole decompressed payload. Pure
+        function of the file (does not touch ``self`` state), so it is safe
+        to run in a worker thread.
 
         For DFCs, ``card.name`` contains the full ``"Front // Back"`` name.
         We key lookups by both the full name and the front face name
@@ -647,57 +707,63 @@ class ScryfallBulkClient:
         Raises:
             ScryfallBulkError: If the payload is malformed or yields no cards.
         """
-        entries = self._extract_entries(self._decompress_if_gzip(raw_bytes))
-
         cards: dict[str, Card] = {}
         unique: list[Card] = []
         skipped = 0
+        total = 0
 
-        for entry in entries:
-            if not isinstance(entry, dict):
-                skipped += 1
-                continue
+        try:
+            fh = self._open_payload(path)
+        except OSError as exc:
+            raise ScryfallBulkError(f"Failed to parse bulk data: {exc}") from exc
 
-            layout = entry.get("layout", "")
-            if layout in _EXCLUDED_LAYOUTS:
-                skipped += 1
-                continue
+        with fh:
+            for entry in self._iter_entries(fh):
+                total += 1
+                if not isinstance(entry, dict):
+                    skipped += 1
+                    continue
 
-            try:
-                card = Card.model_validate(entry)
-            except (ValidationError, ValueError) as exc:
-                log.warning(
-                    "scryfall_bulk.card_parse_error",
-                    card_name=entry.get("name", "unknown"),
-                    error=str(exc),
-                )
-                skipped += 1
-                continue
+                layout = entry.get("layout", "")
+                if layout in _EXCLUDED_LAYOUTS:
+                    skipped += 1
+                    continue
 
-            unique.append(card)
+                try:
+                    card = Card.model_validate(entry)
+                except (ValidationError, ValueError) as exc:
+                    log.warning(
+                        "scryfall_bulk.card_parse_error",
+                        card_name=entry.get("name", "unknown"),
+                        error=str(exc),
+                    )
+                    skipped += 1
+                    continue
 
-            # Key by full lowercase name for O(1) case-insensitive lookup
-            full_name_lower = card.name.lower()
-            cards[full_name_lower] = card
+                _intern_card(card)
+                unique.append(card)
 
-            # For DFCs, card.name is "Front // Back". Also key by front-face
-            # name so lookup by either form works.
-            if " // " in card.name:
-                front_face = card.name.split(" // ")[0].lower()
-                if front_face != full_name_lower:
-                    cards[front_face] = card
+                # Key by full lowercase name for O(1) case-insensitive lookup
+                full_name_lower = card.name.lower()
+                cards[full_name_lower] = card
+
+                # For DFCs, card.name is "Front // Back". Also key by front-face
+                # name so lookup by either form works.
+                if " // " in card.name:
+                    front_face = card.name.split(" // ")[0].lower()
+                    if front_face != full_name_lower:
+                        cards[front_face] = card
 
         if skipped:
             log.info("scryfall_bulk.parse_summary", skipped=skipped, loaded=len(unique))
 
         if not unique:
             raise ScryfallBulkError(
-                f"Parsed 0 cards from {len(entries)} entries ({skipped} skipped). "
+                f"Parsed 0 cards from {total} entries ({skipped} skipped). "
                 "Scryfall bulk data schema may have changed."
             )
 
-        self._cards = cards
-        self._unique_cards = unique
+        return cards, unique
 
     async def _refresh_loop(self) -> None:
         """Background loop that periodically calls ensure_loaded().

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -229,19 +228,13 @@ class TestScryfallBulkMounted:
         """Calling bulk_card_lookup through the orchestrator returns card data."""
         metadata = json.loads((SCRYFALL_BULK_FIXTURES / "bulk_metadata.json").read_text())
         oracle_cards = json.loads((SCRYFALL_BULK_FIXTURES / "oracle_cards_sample.json").read_text())
-        mock_metadata_resp = httpx.Response(
-            200,
-            json=metadata,
-            headers={"etag": '"test-etag"'},
-        )
-        mock_cards_resp = httpx.Response(200, json=oracle_cards)
-
-        with patch("mtg_mcp_server.services.scryfall_bulk.httpx.AsyncClient") as mock_cls:
-            mock_http = AsyncMock()
-            mock_http.get = AsyncMock(side_effect=[mock_metadata_resp, mock_cards_resp])
-            mock_http.__aenter__ = AsyncMock(return_value=mock_http)
-            mock_http.__aexit__ = AsyncMock(return_value=False)
-            mock_cls.return_value = mock_http
+        with respx.mock(assert_all_called=False) as router:
+            router.get(f"{SCRYFALL_BASE}/bulk-data/oracle_cards").mock(
+                return_value=httpx.Response(200, json=metadata)
+            )
+            router.get(metadata["jsonl_download_uri"]).mock(
+                return_value=httpx.Response(200, json=oracle_cards, headers={"ETag": '"test-etag"'})
+            )
 
             result = await mcp_client.call_tool("bulk_card_lookup", {"name": "Sol Ring"})
             text = result.content[0].text
@@ -252,19 +245,13 @@ class TestScryfallBulkMounted:
         """Calling bulk_card_search through the orchestrator returns search results."""
         metadata = json.loads((SCRYFALL_BULK_FIXTURES / "bulk_metadata.json").read_text())
         oracle_cards = json.loads((SCRYFALL_BULK_FIXTURES / "oracle_cards_sample.json").read_text())
-        mock_metadata_resp = httpx.Response(
-            200,
-            json=metadata,
-            headers={"etag": '"test-etag"'},
-        )
-        mock_cards_resp = httpx.Response(200, json=oracle_cards)
-
-        with patch("mtg_mcp_server.services.scryfall_bulk.httpx.AsyncClient") as mock_cls:
-            mock_http = AsyncMock()
-            mock_http.get = AsyncMock(side_effect=[mock_metadata_resp, mock_cards_resp])
-            mock_http.__aenter__ = AsyncMock(return_value=mock_http)
-            mock_http.__aexit__ = AsyncMock(return_value=False)
-            mock_cls.return_value = mock_http
+        with respx.mock(assert_all_called=False) as router:
+            router.get(f"{SCRYFALL_BASE}/bulk-data/oracle_cards").mock(
+                return_value=httpx.Response(200, json=metadata)
+            )
+            router.get(metadata["jsonl_download_uri"]).mock(
+                return_value=httpx.Response(200, json=oracle_cards, headers={"ETag": '"test-etag"'})
+            )
 
             result = await mcp_client.call_tool("bulk_card_search", {"query": "bolt"})
             text = result.content[0].text

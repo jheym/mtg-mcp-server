@@ -403,8 +403,8 @@ Card objects in the bulk data use the **same shape** as Scryfall API responses â
 
 `ScryfallBulkClient` is **not** a `BaseClient` subclass. It's a file-based service that:
 1. Discovers the download URL via Scryfall's `/bulk-data` endpoint (prefers `jsonl_download_uri`, falls back to legacy `download_uri` with a log line)
-2. Downloads the Oracle Cards file lazily on first access (not at startup)
-3. Parses into `dict[str, Card]` keyed by lowercase name for O(1) lookups
+2. Downloads the Oracle Cards file lazily on first access (not at startup), streaming the body to a temp file in 1 MiB chunks (never held in memory whole)
+3. Parses the file line by line in a worker thread (`asyncio.to_thread`) into `dict[str, Card]` keyed by lowercase name for O(1) lookups. Only one raw card dict is alive at a time; repeated short strings (legality keys/values, rarity, layout, set, colors, keywords) are interned. The new card set replaces the old one only after it is complete, and the temp file is always deleted. Measured on a synthetic 36k-card file: peak added RSS ~0.2 GB vs ~1.4 GB for the old whole-payload loader
 4. Filters out non-playable layouts (art_series, token, double_faced_token, emblem, vanguard, planar, scheme, augment, host) to prevent overwriting real cards
 5. Runs background refresh via `start_background_refresh()` every `MTG_MCP_BULK_DATA_REFRESH_HOURS` (default 12h)
 6. On refresh failure with existing data, serves stale data rather than failing
