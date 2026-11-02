@@ -1236,3 +1236,104 @@ class TestRandomCard:
         card = await loaded_client.random_card(color_identity=frozenset({"R"}))
         if card is not None:
             assert frozenset(card.color_identity).issubset({"R"})
+
+
+class TestStreamingLoad:
+    """The bulk file is streamed to disk and parsed line by line.
+
+    Regression for out-of-memory restarts on small hosts: the old loader held
+    the compressed body, the decompressed body, the decoded text, its line
+    list, and a list of every raw card dict in memory at the same time.
+    """
+
+    @staticmethod
+    def _bulk_temp_files(tmp_path: Path) -> list[Path]:
+        return sorted(tmp_path.glob("scryfall-bulk-*"))
+
+    async def test_temp_file_removed_after_load(self, tmp_path, monkeypatch):
+        """The downloaded temp file is deleted once parsing completes."""
+        monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
+        with respx.mock:
+            _mock_metadata_route(respx)
+            _mock_download_route(respx)
+
+            client = ScryfallBulkClient(base_url=_BASE_URL, refresh_hours=24)
+            async with client:
+                await client.ensure_loaded()
+                assert len(client._unique_cards) > 0
+        assert self._bulk_temp_files(tmp_path) == []
+
+    async def test_temp_file_removed_after_parse_failure(self, tmp_path, monkeypatch):
+        """The temp file is deleted even when the payload fails to parse."""
+        monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
+        with respx.mock:
+            _mock_metadata_route(respx)
+            _mock_download_route(respx, content=b"not json at all")
+
+            client = ScryfallBulkClient(base_url=_BASE_URL, refresh_hours=24)
+            async with client:
+                with pytest.raises(ScryfallBulkError):
+                    await client.ensure_loaded()
+        assert self._bulk_temp_files(tmp_path) == []
+
+    async def test_temp_file_removed_after_http_error(self, tmp_path, monkeypatch):
+        """No temp file is left behind when the download returns an error status."""
+        monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
+        with respx.mock:
+            _mock_metadata_route(respx)
+            _mock_download_route(respx, status_code=503, content=b"")
+
+            client = ScryfallBulkClient(base_url=_BASE_URL, refresh_hours=24)
+            async with client:
+                with pytest.raises(ScryfallBulkDownloadError):
+                    await client.ensure_loaded()
+        assert self._bulk_temp_files(tmp_path) == []
+
+    async def test_uncompressed_jsonl_without_trailing_newline(self):
+        """Plain (not gzipped) JSONL whose last line has no newline still loads."""
+        sample = json.loads(_load_oracle_cards())
+        body = "\n".join(json.dumps(c) for c in sample).encode()
+        with respx.mock:
+            _mock_metadata_route(respx)
+            _mock_download_route(respx, content=body)
+
+            client = ScryfallBulkClient(base_url=_BASE_URL, refresh_hours=24)
+            async with client:
+                await client.ensure_loaded()
+                assert len(client._unique_cards) == 27
+                assert await client.get_card(sample[-1]["name"]) is not None
+
+    async def test_failed_refresh_keeps_old_cards_until_new_set_ready(self):
+        """Lookups keep working during and after a failed refresh parse."""
+        with respx.mock:
+            _mock_metadata_route(respx)
+            _mock_download_route(respx)
+
+            client = ScryfallBulkClient(base_url=_BASE_URL, refresh_hours=1)
+            async with client:
+                await client.ensure_loaded()
+                before = client._unique_cards
+
+                respx.reset()
+                _mock_metadata_route(respx)
+                _mock_download_route(respx, content=b'{"id": "x"}\nbroken line\n')
+                with patch(
+                    "mtg_mcp_server.services.scryfall_bulk.time.monotonic",
+                    return_value=client._loaded_at + 7200,
+                ):
+                    await client.ensure_loaded()
+
+                assert client._unique_cards is before
+                assert await client.get_card("Sol Ring") is not None
+
+    async def test_repeated_strings_are_shared(self, loaded_client):
+        """Legality keys/values and rarity strings are interned across cards."""
+        cards = [c for c in loaded_client._unique_cards if c.legalities]
+        assert len(cards) >= 2
+        a, b = cards[0], cards[1]
+        key_a = next(k for k in a.legalities if k == "commander")
+        key_b = next(k for k in b.legalities if k == "commander")
+        assert key_a is key_b
+        same_rarity = [c for c in cards if c.rarity == a.rarity]
+        if len(same_rarity) >= 2:
+            assert same_rarity[0].rarity is same_rarity[1].rarity
