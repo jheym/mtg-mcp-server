@@ -67,3 +67,27 @@ curl -i -X POST <BASE_URL>/mcp                       # 401 with resource_metadat
 curl <BASE_URL>/.well-known/oauth-protected-resource/mcp
 curl <BASE_URL>/.well-known/oauth-authorization-server
 ```
+
+## Cloud Run
+
+`scripts/deploy_cloud_run.sh` does the whole setup in one run (safe to re-run):
+enables the APIs, creates a service account, stores the OAuth client secret and a
+generated JWT signing key in Secret Manager, creates a private Cloud Storage bucket
+for OAuth state (mounted at `/data`, `FASTMCP_HOME=/data`, so sign-ins survive
+scale-to-zero), and deploys from source with the `Dockerfile`.
+
+```bash
+PROJECT_ID=my-project \
+ALLOWED_EMAILS=me@gmail.com,friend@gmail.com \
+GOOGLE_CLIENT_ID=123.apps.googleusercontent.com \
+bash scripts/deploy_cloud_run.sh
+```
+
+It prints the connector URL and the redirect URI to add to the Google OAuth client
+(`https://SERVICE-PROJECT_NUMBER.REGION.run.app/auth/callback`). Defaults:
+`us-west1`, 1 GiB, scale to zero, max 1 instance. The service allows
+unauthenticated invocation at the Cloud Run layer because MCP clients need OAuth,
+not IAM; the server enforces sign-in itself.
+
+Prefect Horizon note: Horizon's gateway serves its own `/.well-known` OAuth
+endpoints, so self-hosted sign-in needs a plan where that can be turned off.

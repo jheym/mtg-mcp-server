@@ -30,6 +30,7 @@ class Settings(BaseSettings):
 
     # --- Transport ---
     transport: Literal["stdio", "http"] = "stdio"
+    http_host: str = "127.0.0.1"  # Use 0.0.0.0 in containers (Cloud Run, Docker)
     http_port: int = 8000
 
     # --- Logging ---

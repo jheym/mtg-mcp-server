@@ -190,7 +190,11 @@ def main() -> None:  # pragma: no cover
             transport = sys.argv[1]
 
         if transport == "http":
-            mcp.run(transport="streamable-http", host="127.0.0.1", port=_settings.http_port)
+            mcp.run(
+                transport="streamable-http",
+                host=_settings.http_host,
+                port=_settings.http_port,
+            )
         else:
             mcp.run(transport="stdio")
     except KeyboardInterrupt:

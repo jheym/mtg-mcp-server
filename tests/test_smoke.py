@@ -101,6 +101,7 @@ class TestConfig:
         settings = Settings()
         assert settings.transport == "stdio"
         assert settings.http_port == 8000
+        assert settings.http_host == "127.0.0.1"
         assert settings.log_level == "INFO"
         assert settings.scryfall_base_url == "https://api.scryfall.com"
         assert settings.enable_edhrec is True
@@ -112,9 +113,11 @@ class TestConfig:
         """MTG_MCP_ env vars override defaults."""
         monkeypatch.setenv("MTG_MCP_LOG_LEVEL", "DEBUG")
         monkeypatch.setenv("MTG_MCP_HTTP_PORT", "9000")
+        monkeypatch.setenv("MTG_MCP_HTTP_HOST", "0.0.0.0")
         settings = Settings()
         assert settings.log_level == "DEBUG"
         assert settings.http_port == 9000
+        assert settings.http_host == "0.0.0.0"
 
 
 class TestLogging:
