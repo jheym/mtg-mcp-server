@@ -37,10 +37,10 @@ mcp = FastMCP(
     "MTG",
     version=__version__,
     mask_error_details=True,
-    website_url="https://github.com/j4th/mtg-mcp-server",
+    website_url="https://github.com/jheym/mtg-mcp-server",
     icons=[
         Icon(
-            src="https://raw.githubusercontent.com/j4th/mtg-mcp-server/main/icon.svg",
+            src="https://raw.githubusercontent.com/jheym/mtg-mcp-server/main/icon.svg",
             mimeType="image/svg+xml",
             sizes=["512x512"],
         )
@@ -190,7 +190,11 @@ def main() -> None:  # pragma: no cover
             transport = sys.argv[1]
 
         if transport == "http":
-            mcp.run(transport="streamable-http", host="127.0.0.1", port=_settings.http_port)
+            mcp.run(
+                transport="streamable-http",
+                host=_settings.http_host,
+                port=_settings.http_port,
+            )
         else:
             mcp.run(transport="stdio")
     except KeyboardInterrupt:
