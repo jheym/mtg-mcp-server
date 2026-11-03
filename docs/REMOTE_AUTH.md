@@ -89,5 +89,9 @@ It prints the connector URL and the redirect URI to add to the Google OAuth clie
 unauthenticated invocation at the Cloud Run layer because MCP clients need OAuth,
 not IAM; the server enforces sign-in itself.
 
+Custom domain: map it with Cloud Run domain mapping (Preview; us-west1 supported)
+or a load balancer, then re-run the script with `BASE_URL=https://your.domain` and
+add `https://your.domain/auth/callback` to the OAuth client.
+
 Prefect Horizon note: Horizon's gateway serves its own `/.well-known` OAuth
 endpoints, so self-hosted sign-in needs a plan where that can be turned off.

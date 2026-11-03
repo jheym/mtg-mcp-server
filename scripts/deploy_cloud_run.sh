@@ -33,8 +33,11 @@ say() { printf '\n==> %s\n' "$*"; }
 
 gcloud config set project "$PROJECT_ID" >/dev/null
 PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
-# Cloud Run's deterministic URL: https://SERVICE-PROJECT_NUMBER.REGION.run.app
-BASE_URL="https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
+# Public URL used for OAuth. Defaults to Cloud Run's deterministic URL
+# (https://SERVICE-PROJECT_NUMBER.REGION.run.app). Set BASE_URL for a custom
+# domain, e.g. BASE_URL=https://balthazar.io (no trailing slash, no /mcp).
+BASE_URL="${BASE_URL:-https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app}"
+BASE_URL="${BASE_URL%/}"
 
 say "Enabling APIs (first run takes a minute)"
 gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
