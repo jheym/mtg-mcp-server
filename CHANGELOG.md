@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- Optional Google sign-in for HTTP deployments with a verified-email allowlist
+  (`MTG_MCP_GOOGLE_CLIENT_ID` and related vars; off by default, fails closed on
+  partial config). Optional Redis-backed OAuth state via the `auth-redis` extra.
+  See `docs/REMOTE_AUTH.md`.
+
 ### Fixed
 
 - `suggest_sideboard` now filters sideboard candidates by the deck's color identity,
