@@ -148,6 +148,7 @@ mtg-mcp/
 │       ├── config.py               # pydantic-settings: API URLs, rate limits, feature flags
 │       ├── logging.py              # structlog configuration
 │       ├── smithery.py             # Smithery deployment adapter
+│       ├── auth.py                 # Optional Google sign-in + email allowlist (HTTP)
 │       ├── types.py                # Shared Pydantic models (Card, Combo, CardRating, etc.)
 │       │
 │       ├── services/               # HTTP API clients — NO MCP awareness
@@ -739,6 +740,7 @@ mise run check    # Runs lint + typecheck + test — all must pass
 | Spicerack provider | Behind feature flag, `ns=spicerack` | Documented public REST API for tournament results. Lowest-risk new data source. Optional `X-API-Key` for higher rate limits |
 | MTGGoldfish provider | Behind feature flag, `ns=goldfish` | HTML scraping (no API) with selectolax. Browser-like UA required. Follows EDHREC fragile-source pattern: feature flag, TAGS_BETA, aggressive caching, ToolError on failure |
 | HTML parsing dependency | selectolax | 10-50x faster than BeautifulSoup, tiny footprint. Added for MTGGoldfish HTML scraping. Only used in `services/mtggoldfish.py` |
+| Remote auth | Optional FastMCP `GoogleProvider` (OAuth proxy) + global `AuthMiddleware` email allowlist, gated on `MTG_MCP_GOOGLE_CLIENT_ID` | Lets a small group share one hosted HTTP server without a paid platform member plan. Fails closed on partial config; stdio unaffected. See `docs/REMOTE_AUTH.md` |
 
 ---
 

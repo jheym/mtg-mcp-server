@@ -48,6 +48,7 @@ dependencies = [
 
 [project.optional-dependencies]
 code-mode = ["fastmcp[code-mode]>=3.2.0"]
+auth-redis = ["py-key-value-aio[redis]"]
 
 [project.urls]
 Homepage = "https://github.com/j4th/mtg-mcp-server"

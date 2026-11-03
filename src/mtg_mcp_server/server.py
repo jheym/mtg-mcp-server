@@ -19,6 +19,7 @@ from fastmcp.server.middleware.response_limiting import ResponseLimitingMiddlewa
 from mcp.types import Icon, ToolAnnotations
 
 from mtg_mcp_server import __version__
+from mtg_mcp_server.auth import build_auth_middleware, build_auth_provider, parse_allowed_emails
 from mtg_mcp_server.config import Settings
 from mtg_mcp_server.logging import configure_logging
 from mtg_mcp_server.providers.edhrec import edhrec_mcp
@@ -104,6 +105,20 @@ except Exception:
 
 if _settings.disable_cache:
     disable_all_caches()
+
+# Optional Google sign-in (HTTP only; FastMCP skips auth checks on stdio).
+# Off unless MTG_MCP_GOOGLE_CLIENT_ID is set; Settings validation fails closed
+# on a partial config.
+_auth_provider = build_auth_provider(_settings)
+if _auth_provider is not None:
+    mcp.auth = _auth_provider
+    mcp.add_middleware(build_auth_middleware(_settings))
+    structlog.get_logger(service="startup").info(
+        "auth.google_enabled",
+        base_url=_settings.auth_base_url,
+        allowed_emails=len(parse_allowed_emails(_settings.auth_allowed_emails)),
+        persistent_storage=bool(_settings.auth_redis_url.get_secret_value()),
+    )
 
 # Feature-flagged backends: enabled by default but can be disabled via env vars.
 # 17Lands rate-limits aggressively; EDHREC scrapes undocumented endpoints;

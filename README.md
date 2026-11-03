@@ -198,6 +198,8 @@ uvx --env MTG_MCP_ENABLE_EDHREC=false mtg-mcp-server
 
 See `.env.example` for all available options including base URLs, rate limits, and cache settings.
 
+Remote HTTP deployments can require Google sign-in with an email allowlist (off by default). See [REMOTE_AUTH.md](docs/REMOTE_AUTH.md).
+
 ## Tools
 
 69 tools across 13 domains. See [docs/TOOL_DESIGN.md](docs/TOOL_DESIGN.md) for full input/output details.
@@ -395,6 +397,7 @@ mise run fix          # Auto-fix lint and format issues
 | [SERVICE_CONTRACTS.md](docs/SERVICE_CONTRACTS.md) | API endpoints, rate limits, response shapes per backend |
 | [DATA_SOURCES.md](docs/DATA_SOURCES.md) | All data sources with auth, stability, and access patterns |
 | [CACHING_DESIGN.md](docs/CACHING_DESIGN.md) | TTL cache strategy and Scryfall bulk data design |
+| [REMOTE_AUTH.md](docs/REMOTE_AUTH.md) | Optional Google sign-in and email allowlist for hosted HTTP deployments |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup, TDD workflow, code style, PR process |
 | [CHANGELOG.md](CHANGELOG.md) | Version history in Keep a Changelog format |
 
