@@ -75,6 +75,14 @@ fi
 retry gcloud storage buckets add-iam-policy-binding "gs://${BUCKET}" \
   --member="serviceAccount:${SA_EMAIL}" --role=roles/storage.objectUser >/dev/null
 
+say "Build service account permissions"
+# New projects do not give the default compute service account Editor, and
+# source deploys build as that account.
+BUILD_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+retry gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${BUILD_SA}" --role=roles/run.builder \
+  --condition=None >/dev/null
+
 say "Building and deploying ${SERVICE} to ${REGION}"
 # ^|^ switches the env-var list separator so the comma-separated email list survives.
 gcloud run deploy "$SERVICE" \
