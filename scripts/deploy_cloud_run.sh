@@ -30,6 +30,8 @@ SECRET_CLIENT="mtg-mcp-google-client-secret"
 SECRET_JWT="mtg-mcp-jwt-signing-key"
 
 say() { printf '\n==> %s\n' "$*"; }
+# A new service account takes a short time to propagate through IAM.
+retry() { local n; for n in 1 2 3 4 5 6; do "$@" && return; sleep 10; done; "$@"; }
 
 gcloud config set project "$PROJECT_ID" >/dev/null
 PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
@@ -61,7 +63,7 @@ if ! gcloud secrets describe "$SECRET_JWT" >/dev/null 2>&1; then
     --replication-policy=automatic
 fi
 for s in "$SECRET_CLIENT" "$SECRET_JWT"; do
-  gcloud secrets add-iam-policy-binding "$s" --member="serviceAccount:${SA_EMAIL}" \
+  retry gcloud secrets add-iam-policy-binding "$s" --member="serviceAccount:${SA_EMAIL}" \
     --role=roles/secretmanager.secretAccessor >/dev/null
 done
 
@@ -70,7 +72,7 @@ if ! gcloud storage buckets describe "gs://${BUCKET}" >/dev/null 2>&1; then
   gcloud storage buckets create "gs://${BUCKET}" --location="$REGION" \
     --uniform-bucket-level-access --public-access-prevention
 fi
-gcloud storage buckets add-iam-policy-binding "gs://${BUCKET}" \
+retry gcloud storage buckets add-iam-policy-binding "gs://${BUCKET}" \
   --member="serviceAccount:${SA_EMAIL}" --role=roles/storage.objectUser >/dev/null
 
 say "Building and deploying ${SERVICE} to ${REGION}"
